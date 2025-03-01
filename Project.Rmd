@@ -1,0 +1,402 @@
+---
+title: 'Blackjack: the science of winning'
+subtitle: "Research project"
+author: "Zakharii Tepliakov, Danyil Ikonnikov, Stanislav Vus"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r include = FALSE}
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(tidyr)
+```
+
+## Data overview
+
+Our data is blackjack games, simulated using a realistic simulator according to Las Vegas casinos' most common set of rules. Suits are irrelevant and, therefore, not recorded.
+
+The object of the game is to win by creating card totals higher than those of the dealer's hand but not exceeding 21, or by stopping at a total in the hope that the dealer will bust. Number cards count as their number, the jack, queen, and king count as 10, and aces count as either 1 or 11 depending on whether or not counting it as 11 would cause a bust. If a player exceeds 21 points, they bust and automatically lose. A total of 21 on the starting two cards is called a "blackjack", and is the strongest hand.
+
+Key columns include:
+
+-   shoe_id: Identifier for the shoe;
+-   cards_remaining: Number of cards remaining at the start of a round;
+-   dealer_up: Dealer's visible card;
+-   initial_hand: Player's starting two cards;
+-   dealer_final: Dealer's final hand;
+-   dealer_final_value: Dealer's final hand value;
+-   player_final: Player's final hand(s);
+-   player_final_value: Player's final hand value(s);
+-   actions_taken: Sequence of actions taken by the player;
+-   run_count: The count according to the Hi-Lo card counting system; According to the dataset description, it was simulated with realistic game rules and basic strategy.
+-   true_count: The true count according to the Hi-Lo card counting system;
+-   win: Amount won or lost in the round.
+
+Also we added a new column `win_category` to categorize wins and losses:
+
+```{r}
+set.seed(1)
+df <- read.csv("blackjack_simulator.csv", nrows = 1000000)
+df$win_category <- ifelse(df$win > 0, "Win", ifelse(df$win < 0, "Loss", "Draw"))
+head(df)
+```
+
+
+----------
+
+## Hypothesis testing
+
+### Hypothesis №1
+
+### What is Hi-Lo and run count?
+##### The Hi-Lo card counting system is a popular card counting strategy used in blackjack to determine when the player has an advantage over the dealer. The system assigns a value of +1, 0, or -1 to each card in the deck. 
+##### Cards 2-6 are assigned a value of +1, cards 7-9 are assigned a value of 0, and cards 10-11 (Aces) are assigned a value of -1 (Note that in Blackjack, all face cards have a value of 10). 
+##### The count is updated as cards are dealt, and a higher count indicates a higher proportion of high cards (10s and Aces) remaining in the deck, which is favorable for the player.
+##### This strategy is supposed to give the player a slight edge over the dealer, as the player can adjust their bets based on the count to take advantage of the higher probability of getting a blackjack (21 points) or a higher total when the count is high. So, let's test if it really works!
+
+- $H_0$: Won games have the same mean run count as lost games.
+
+- $H_1$: Won games have a higher mean run count than lost games.
+
+----------
+
+##### Here  we adjust the dataframe, so that if the player splits their hand, each of them is counted as a separate outcome. Also, we replace Blackjacks ('BJ') with their value (21)
+
+```{r}
+# Step 1: Replace 'BJ' with 21 in player_final_value
+df <- df %>%
+  mutate(player_final_value = str_replace_all(player_final_value, "\\[|\\]", ""),
+         player_final_value = ifelse(player_final_value == "'BJ'", "21", player_final_value),
+         player_final_value_list = str_split(player_final_value, ","))  # Splitting values for later use
+
+# Step 2: Expand rows for splits
+df_expanded <- df %>%
+  rowwise() %>%
+  mutate(
+    # Count how many lists are in player_final_value
+    num_splits = length(player_final_value_list),
+
+    player_final_split = if (num_splits > 1) list(player_final_value_list) else list(player_final_value_list[[1]]),
+    actions_split = if (num_splits > 1) list(rep(actions_taken, num_splits)) else list(actions_taken),
+    win_split = if (num_splits > 1) list(rep(win / num_splits, num_splits)) else list(win)
+  ) %>%
+  unnest(cols = c(player_final_split, actions_split, win_split)) %>%  # Expand rows based on splits
+  mutate(
+    # Expand the player_final_value into its final expanded form
+    player_final_value = as.numeric(unlist(player_final_split)),
+    win = unlist(win_split)
+  ) %>%
+  select(-num_splits, -player_final_split, -win_split)  # Clean up unnecessary columns
+
+# Step 3: Recalculate win_category after splitting
+df_expanded <- df_expanded %>%
+  mutate(win_category = ifelse(win > 0, 1, ifelse(win < 0, -1, 0)))
+```
+
+----------
+
+##### Let's show the relationship between Hi-Lo count and win rate. To do this, we will plot the mean Hi-Lo count for each win category (loss, draw, win).
+
+```{r}
+mean_run_count <- df %>%
+  group_by(win_category) %>%
+  summarise(mean_run_count = mean(run_count))
+
+# Print the result
+print(mean_run_count)
+```
+
+```{r echo = FALSE}
+# Fancy plot for mean_run_count
+ggplot(mean_run_count, aes(x = factor(win_category, labels = c("Loss", "Draw", "Win")), 
+                           y = mean_run_count, fill = factor(win_category))) +
+  geom_bar(stat = "identity", alpha = 0.8, width = 0.6) +
+  geom_text(aes(label = round(mean_run_count, 2)), 
+            vjust = -0.5, size = 5, fontface = "bold") +
+  scale_fill_manual(values = c("red", "gray", "green"), 
+                    labels = c("Loss", "Draw", "Win")) +
+  labs(x = "Win Category", 
+       y = "Mean Run Count", 
+       title = "Mean Run Count by Win Category") +
+  theme_minimal(base_size = 20) +
+  theme(
+    axis.text = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  ) + ylim(0, 0.35)
+```
+
+##### At first sight, we can see that the mean run count is significantly larger in won games compared to lost games. This suggests that higher Hi-Lo count is connected to a higher win rate.
+##### To further investigate this, we will perform a t-test to check if the difference in mean run count between won and lost games is statistically significant.
+##### First, however, let's check if the overall run count, as well as the run count in won and lost games, is normally distributed.
+##### To do this, we will:
+1. Plot the distribution of run counts and create a Q-Q plot, to visually check for normality;
+2. Jitter the data slightly to introduce random noise and avoid ties in the Shapiro-Wilk test;
+3. Perform the Shapiro-Wilk test for normality.
+
+```{r echo = FALSE}
+# Histogram with density overlay
+ggplot(df_expanded, aes(x = run_count)) +
+  geom_histogram(aes(y = ..density..), fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1, bw = 1) +
+  labs(title = "Distribution of Run Counts",
+       x = "Run Count",
+       y = "Density") +
+  theme_minimal(base_size = 16)
+
+# Q-Q plot
+ggplot(df_expanded, aes(sample = run_count)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(title = "Q-Q Plot of Run Counts") +
+  theme_minimal(base_size = 16)
+
+# Shapiro-Wilk test for normality
+rounds_jittered <- df_expanded %>% mutate(run_count = run_count + runif(nrow(df_expanded), -0.5, 0.5))
+
+shapiro.test(sample(rounds_jittered$run_count, 1000))
+```
+
+The test statistic for the Shapiro-Wilk test is given by $\displaystyle W={\left(\sum _{i=1}^{n}a_{i}x_{(i)}\right)^{2} \over \sum _{i=1}^{n}(x_{i}-{\overline {x}})^{2}},$ where $\displaystyle x_{(i)}$ is the $\displaystyle i$-th order statistic ($i$-th smallest number in the sample), and $\displaystyle \bar{x}$ is the sample mean.
+
+$H_0$ is that the data is normally distributed, and $H_1$ is that the data is not normally distributed. Since our p-value is larger than 0.05, we fail to reject the null hypothesis, and we can assume that the run count is normally distributed.
+
+----------
+
+##### Let's do the same for won and lost games separately.
+
+```{r echo = FALSE}
+won_rounds <- df_expanded %>% filter(win_category == 1)
+lost_rounds <- df_expanded %>% filter(win_category == -1)
+
+# Distribution of run counts in won games
+ggplot(won_rounds, aes(x = run_count)) +
+  geom_histogram(aes(y = ..density..), fill = "#89CC04", alpha = 0.7) +
+  geom_density(color = "red", size = 1, bw = 1) +
+  labs(title = "Distribution of Run Counts in Won Games",
+       x = "Run Count",
+       y = "Density") +
+  theme_minimal(base_size = 16)
+
+# Q-Q plot of run counts in won games
+ggplot(won_rounds, aes(sample = run_count)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(title = "Q-Q Plot of Run Counts in Won Games") +
+  theme_minimal(base_size = 16)
+
+# Distribution of run counts in lost games
+ggplot(lost_rounds, aes(x = run_count)) +
+  geom_histogram(aes(y = ..density..), fill = "#FF0000", alpha = 0.7) +
+  geom_density(color = "red", size = 1, bw = 1) +
+  labs(title = "Distribution of Run Counts in Lost Games",
+       x = "Run Count",
+       y = "Density") +
+  theme_minimal(base_size = 16)
+
+# Q-Q plot of run counts in lost games
+ggplot(lost_rounds, aes(sample = run_count)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(title = "Q-Q Plot of Run Counts in Lost Games") +
+  theme_minimal(base_size = 16)
+
+# Let's add small jitter to data for testing
+won_rounds_jittered <- won_rounds %>% mutate(run_count = run_count + runif(nrow(won_rounds), -0.5, 0.5))
+lost_rounds_jittered <- lost_rounds %>% mutate(run_count = run_count + runif(nrow(lost_rounds), -0.5, 0.5))
+
+# Shapiro-Wilk test for normality
+shapiro.test(sample(won_rounds_jittered$run_count, 1000))
+shapiro.test(sample(lost_rounds_jittered$run_count, 1000))
+```
+
+----------
+
+##### Now that we have confirmed that the run count is normally distributed, we can proceed with the t-test.
+##### First we will check if the variances of the run counts in won and lost games are equal using the f-test for variances.
+
+```{r}
+variance_test <- var.test(won_rounds$run_count, lost_rounds$run_count)
+print(variance_test)
+```
+
+##### The p-value is smaller than 0.05, which means that we should reject the zero hypothesis that both populations have equal variances. However, we can see that in practice the ratio of variances is very close to 1. 
+##### So we will perform both a Student's t-test (assuming equal variances) and Welch's t-test (not assuming equal variances) and compare their results.
+##### $H_0$: the mean run count in won games is equal to that of lost games, 
+##### $H_1$: the mean run count in won games is greater than that of lost games.
+
+```{r}
+# Regular t-test (assumes equal variances)
+t_test_equal <- t.test(won_rounds$run_count, lost_rounds$run_count, var.equal = TRUE, alternative = "greater")
+print(t_test_equal)
+
+# Welch's t-test (does not assume equal variances)
+t_test_welch <- t.test(won_rounds$run_count, lost_rounds$run_count, var.equal = FALSE, alternative = "greater")
+print(t_test_welch)
+```
+
+##### Since the p-values are less than 0.05 in both cases, we reject the null hypothesis in favor of the alternative hypothesis. This means that the mean run count in won games is significantly higher than that of lost games.
+
+
+### Hypothesis №2
+
+$H_0$: Players are equally likely to win or lose regardless of the dealer's up card being 10 or 11 (Ace).
+
+$H_1$:  Players are more likely to lose when the dealer's upcard is 10 or 11 (Ace).
+
+To check this, we can use the chi-squared test for independence. The chi-squared test can help us decide whether two characteristics are independent or not. To do this, we first create a contingency table:
+
+```{r}
+df$dealer_up_card <- ifelse(df$dealer_up %in% c(10, 11), "10 or 11", "Not 10 or 11")
+
+df_without_draw <- df[df$win_category != "Draw", ]
+
+contingency_table <- table(df_without_draw$dealer_up_card, df_without_draw$win_category)
+
+contingency_table
+```
+
+Now we can perform the chi-squared test. The value for the test statistic is:
+
+$\chi^2 = \displaystyle \sum^R_{i=1} \sum^C_{j=1} \frac{(O_{ij} - E_{ij})^2}{E_{ij}}$
+  
+where $O_{ij}$ is the observed frequency and $E_{ij}$ is the expected frequency, which can be calculated as:
+
+$E_{ij} = \frac{R_i \cdot C_j}{N}$
+
+where $R_i$ is the total number of observations in row $i$, $C_j$ is the overall number of observations in column $j$, and $N$ is the total number of observations.
+
+Under the $H_0$, this sum has approximately a chi-squared distribution whose number of degrees of freedom is
+
+$df = (R - 1) \cdot (C - 1)$
+
+However, we are also using Yates's correction for continuity here. We assume that the discrete probabilities of frequencies in the table can be approximated by a continuous distribution, which is not quite correct, and can introduce some error. To reduce this error, we subtract 0.5 from the difference between the observed and expected values in a $2 \times 2$ contingency table, reducing the value obtained and thus increasing the p-value. The following test statistic is Yates's corrected version of Pearson's chi-squared statistics:
+
+$\chi^2 = \displaystyle \sum^R_{i=1} \sum^C_{j=1} \frac{(|O_{ij} - E_{ij}| - 0.5)^2}{E_{ij}}$
+
+```{r}
+chisq.test(contingency_table)
+```
+
+#### Conclusion
+
+The p-value is close to 0, so we reject the null hypothesis. Players are more likely to lose when the dealer's upcard is 10 or 11 (Ace).
+
+### Hypothesis №3
+
+$H_0$:The less shoes is the more chances to win player has
+
+$H_1$:Chances to win don't depend on size of shoe
+
+#### Logistic regression
+
+1.  Dependent Variable:
+
+    -   Binary: Takes values 0 or 1, where 1 typically represents the "success" or "positive" outcome.
+
+    -   Example: Predicting whether a patient has a disease (1 = Yes, 0 = No).
+
+2.  Independent Variables:
+
+    -   These can be continuous, categorical, or a mix of both. Example: Age, income, education level.
+
+3.  Logit transformation: Logistic regression predicts the log-odds of the dependent variable being 1. The log-odds are transformed into probabilities using the logistic (sigmoid) function: $$p = \frac{1}{1+e^{-(\beta_0+\beta_1X_1+\beta_2X_2+...+\beta_nX_n)}}$$ where:
+
+-   p is the probability of the outcome being 1.
+
+-   $\beta_0$ is the intercept.
+
+-   $\beta_1, \beta_2, ..., \beta_n$ are the coefficients for the independent variables.
+
+\_ $X_1, X_2, ..., X_n$ are the values of the independent variables.
+
+4.  Log-Odds: The log-odds are: $$log-ods = log(\frac{p}{1-p})$$ The logistic regression equation is linear in the log-odds: $$log(\frac{p}{1-p}) = \beta_0+\beta_1X_1+\beta_2X_2+...+\beta_nX_n$$
+
+5.  Interpretation of Coefficients:
+
+-   A positive coefficient ($\beta_i$) means that as the corresponding variable increases, the log-odds (and hence the probability) of the outcome being 1 increase.\
+
+-   A negative coefficient means the probability of the outcome decreases as the variable increases.
+
+```{r}
+df$shoe_part <- ifelse(df$cards_remaining > 248, "Greater 248", "Less 248")
+table_ <- table(df$shoe_part, df$win_category)
+
+table_
+
+dfr <- df %>% filter(win_category %in% c("Win", "Loss"))
+
+dfr$win_loss <- ifelse(dfr$win_category == "Win", 1, 0)
+
+model <- glm(win_loss ~ cards_remaining, data = dfr, family = binomial)
+summary(model)
+
+dfr$predicted_prob <- predict(model, type = "response")
+
+ggplot(dfr, aes(x = cards_remaining, y = win_loss)) +
+  geom_point(aes(color = as.factor(win_loss)), size = 3) +
+  stat_smooth(method = "glm", method.args = list(family = binomial), color = "blue") +
+  labs(
+    title = "Correlation Between Number of Cards and Win/Loss",
+    x = "Number of Cards",
+    y = "Win/Loss Probability"
+  ) +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "green"), labels = c("Loss", "Win"), name = "Outcome")
+
+dfr$predicted_class <- ifelse(dfr$predicted_prob > 0.5, 1, 0)
+
+accuracy <- mean(dfr$predicted_class == dfr$win_loss)
+print(paste("Accuracy:", round(accuracy, 2)))
+
+
+```
+
+### Coefficients:
+
+-   Intercept: -0.1586
+
+    -   This is the baseline log-odds of winning when the cards_remaining is zero. Since it is negative, this suggests that when the number of cards remaining is zero, the odds of winning are less than the odds of losing (the log-odds of win is negative)
+
+-   cards_remaining: -2.638e-06
+
+    -   This is the coefficient for cards_remaining. The very small value of -2.638e-06 indicates that there is an extremely weak association between the number of cards remaining and the likelihood of winning. In fact, this coefficient is very close to zero, which suggests that changes in the number of cards remaining have little to no impact on the probability of winning or losing.
+
+    -   The z value for cards_remaining is -0.124, which is very close to zero. A z value close to zero typically indicates that the predictor (in this case, cards_remaining) is not statistically significant.
+
+-   p-value for cards_remaining: 0.902
+
+    -   The p-value is 0.902, which is much greater than 0.05, indicating that the variable cards_remaining is not statistically significant at the 5% significance level. This means that the number of cards remaining does not have a meaningful relationship with the outcome (win_loss).
+
+### Model Fit Metrics
+
+-   Null Deviance: 1264193
+
+    This value represents the deviance (a measure of model fit) of a null model (a model with no predictors). It represents the goodness of fit for the model when only the intercept is included.
+
+-   Residual Deviance: 1264193
+
+    This value represents the deviance for the model with the predictor cards_remaining. In this case, the residual deviance is nearly identical to the null deviance, suggesting that the inclusion of cards_remaining does not improve the model fit significantly.
+
+-   AIC (Akaike Information Criterion): 1264197
+
+    The AIC is a measure of the relative quality of the model. Lower AIC values indicate better model fit. Since the deviance and AIC have not improved with the addition of cards_remaining, it further suggests that the predictor cards_remaining does not explain the variation in the outcome.
+
+### Statistical Significance:
+
+-   p-value for the intercept is \< 2e-16, indicating that the intercept (the baseline log-odds of win) is statistically significant. However, this result does not indicate that the predictor cards_remaining has any meaningful effect.
+
+-   Significance of cards_remaining:
+
+    The p-value for cards_remaining is 0.902, which is not significant. This means that we fail to reject the null hypothesis that there is no relationship between cards_remaining and win_loss.
+
+### Conclusion
+
+-   No Significant Relationship: The logistic regression results suggest that the number of cards remaining (cards_remaining) has no significant impact on the probability of winning (win_loss). The very small coefficient and high p-value indicate that this variable is not a useful predictor for the outcome.
+
+-   Model Improvement: Since cards_remaining does not seem to explain the variation in win_loss, you might want to consider either removing this predictor from the model or exploring other variables that might be more strongly associated with the outcome. It might also be useful to check if the outcome might depend on interactions with other predictors or nonlinear relationships.
